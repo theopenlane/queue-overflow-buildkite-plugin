@@ -1,0 +1,15 @@
+steps:
+  - label: ":sparkles: lint"
+    plugins:
+      - docker-compose#v5.10.0:
+          run: lint
+
+  - label: ":shell: shellcheck"
+    plugins:
+      - docker-compose#v5.10.0:
+          run: shellcheck
+
+  - label: ":bats: tests"
+    plugins:
+      - docker-compose#v5.10.0:
+          run: tests

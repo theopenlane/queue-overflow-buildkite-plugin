@@ -1,0 +1,32 @@
+env:
+  QUEUE_OVERFLOW_QUEUE: ${QUEUE_OVERFLOW_QUEUE:-self-hosted}
+
+steps:
+  - label: "lint"
+    agents:
+      queue: $QUEUE_OVERFLOW_QUEUE
+    command: make lint
+
+  - group: "tests"
+    steps:
+      - label: "unit"
+        agents:
+          queue: "${QUEUE_OVERFLOW_QUEUE}"
+
+        command: make test
+
+  - label: "pinned to self-hosted"
+    agents:
+      queue: self-hosted
+      size: small
+    command: make release
+
+  - label: "similar variable name"
+    agents:
+      queue: $QUEUE_OVERFLOW_QUEUE_OTHER
+      size: small
+    command: echo hi
+
+  - label: "flow style left alone"
+    agents: { queue: $QUEUE_OVERFLOW_QUEUE, size: large }
+    command: echo flow

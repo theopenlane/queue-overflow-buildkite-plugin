@@ -1,0 +1,21 @@
+services:
+  lint:
+    image: buildkite/plugin-linter
+    command: ["--id", "theopenlane/queue-overflow"]
+    volumes:
+      - ".:/plugin:ro"
+
+  # Tests stub buildkite-agent and curl, but the hook needs real jq.
+  tests:
+    image: bats/bats:1.11.0
+    working_dir: /plugin
+    entrypoint: ["bash", "-c", "apk add --no-cache jq >/dev/null && bats tests/"]
+    volumes:
+      - ".:/plugin:ro"
+
+  shellcheck:
+    image: koalaman/shellcheck:stable
+    working_dir: /plugin
+    command: ["hooks/command"]
+    volumes:
+      - ".:/plugin:ro"

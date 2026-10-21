@@ -1,0 +1,66 @@
+name: Queue Overflow
+description: Overflow Buildkite jobs to another queue when the primary queue backs up
+author: https://github.com/theopenlane
+requirements:
+  - bash
+  - curl
+  - jq
+configuration:
+  properties:
+    primary-queue:
+      type: string
+      description: Queue key that opted-in steps normally run on.
+    overflow-queue:
+      type: string
+      description: Queue key to send opted-in steps to when the primary queue is backed up.
+    pipeline:
+      type: string
+      description: Pipeline file to upload.
+      default: .buildkite/pipeline.yml
+    queue-variable:
+      type: string
+      description: Environment variable the pipeline uses as the queue for steps that may overflow.
+      default: QUEUE_OVERFLOW_QUEUE
+    threshold:
+      type: integer
+      description: Overflow when more than this many jobs are effectively ahead of this build on the primary queue.
+      default: 5
+    priority:
+      type: integer
+      description: Priority of this build's jobs. Overridden by priority-env when that variable is set.
+      default: 0
+    priority-env:
+      type: string
+      description: Name of an environment variable holding this build's priority, read when the hook runs.
+    min-priority:
+      type: integer
+      description: Builds below this priority never overflow.
+      default: 0
+    max-overflow-jobs:
+      type: integer
+      description: Don't overflow when the overflow queue already has this many scheduled or running jobs. 0 means no cap.
+      default: 0
+    strip-tags:
+      type: array
+      items:
+        type: string
+      description: Agent tags to remove from opted-in steps when they overflow (tags agents on the overflow queue don't have).
+    api-token-env:
+      type: string
+      description: Name of the environment variable (for example a Buildkite secret) holding a GraphQL API token.
+      default: QUEUE_OVERFLOW_API_TOKEN
+    cluster-uuid:
+      type: string
+      description: Only count jobs and agents in this cluster. Defaults to BUILDKITE_CLUSTER_ID when set.
+    timeout:
+      type: integer
+      description: Seconds to wait for the Buildkite API before giving up and staying on the primary queue.
+      default: 10
+    dry-run:
+      type: boolean
+      description: Decide and annotate, but always upload to the primary queue.
+      default: false
+  required:
+    - primary-queue
+    - overflow-queue
+  additionalProperties: false

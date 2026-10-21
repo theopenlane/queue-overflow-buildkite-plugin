@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2016 # literal $ in jq programs and markdown is intentional
+#
+# Uploads a pipeline, pointing opted-in steps at the overflow queue when the
+# primary queue is backed up.
+#
+# Opted-in steps set `queue: $QUEUE_OVERFLOW_QUEUE` (or whatever queue-variable
+# is). This hook always exports that variable before uploading: the primary
+# queue normally, the overflow queue when it decides to overflow.
+#
+# "Backed up" = scheduled jobs on the primary queue with priority >= this
+# build's priority (they're dispatched first), minus idle primary agents, is
+# greater than the threshold.
+#
+# Any problem deciding (missing token, API error, timeout) means the build stays
+# on the primary queue. This hook should never be the reason a build fails.
+
+set -euo pipefail
+
+PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+cfg() {
+  local name="BUILDKITE_PLUGIN_QUEUE_OVERFLOW_$1"
+  echo "${!name:-${2:-}}"
+}
+
+cfg_array() {
+  local prefix="BUILDKITE_PLUGIN_QUEUE_OVERFLOW_$1" i=0 out=()
+  local single="${prefix}"
+  if [[ -n "${!single:-}" ]]; then
+    out+=("${!single}")
+  fi
+  while true; do
+    local name="${prefix}_${i}"
+    [[ -n "${!name:-}" ]] || break
+    out+=("${!name}")
+    i=$((i + 1))
+  done
+  local IFS=,
+  echo "${out[*]:-}"
+}
+
+log() { echo "[queue-overflow] $*" >&2; }
+
+is_int() { [[ "$1" =~ ^-?[0-9]+$ ]]; }
+
+PRIMARY=$(cfg PRIMARY_QUEUE)
+OVERFLOW=$(cfg OVERFLOW_QUEUE)
+PIPELINE=$(cfg PIPELINE .buildkite/pipeline.yml)
+QUEUE_VAR=$(cfg QUEUE_VARIABLE QUEUE_OVERFLOW_QUEUE)
+THRESHOLD=$(cfg THRESHOLD 5)
+PRIORITY=$(cfg PRIORITY 0)
+PRIORITY_ENV=$(cfg PRIORITY_ENV)
+MIN_PRIORITY=$(cfg MIN_PRIORITY 0)
+MAX_OVERFLOW=$(cfg MAX_OVERFLOW_JOBS 0)
+STRIP_TAGS=$(cfg_array STRIP_TAGS)
+TOKEN_ENV=$(cfg API_TOKEN_ENV QUEUE_OVERFLOW_API_TOKEN)
+CLUSTER_UUID=$(cfg CLUSTER_UUID "${BUILDKITE_CLUSTER_ID:-}")
+TIMEOUT=$(cfg TIMEOUT 10)
+DRY_RUN=$(cfg DRY_RUN false)
+ORG="${BUILDKITE_ORGANIZATION_SLUG:-}"
+
+if [[ -z "${PRIMARY}" || -z "${OVERFLOW}" ]]; then
+  log "primary-queue and overflow-queue are required"
+  exit 1
+fi
+if [[ ! "${QUEUE_VAR}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+  log "queue-variable '${QUEUE_VAR}' is not a valid environment variable name"
+  exit 1
+fi
+if [[ ! -f "${PIPELINE}" ]]; then
+  log "pipeline file '${PIPELINE}' not found"
+  exit 1
+fi
+
+if [[ -n "${PRIORITY_ENV}" && -n "${!PRIORITY_ENV:-}" ]]; then
+  PRIORITY="${!PRIORITY_ENV}"
+fi
+
+record() {
+  local queue="$1" reason="$2"
+  buildkite-agent meta-data set "queue-overflow:${QUEUE_VAR}" "${queue}" >/dev/null 2>&1 || true
+  printf 'Steps using `$%s` queued on `%s`: %s\n' "${QUEUE_VAR}" "${queue}" "${reason}" |
+    buildkite-agent annotate --style info --context "queue-overflow-${QUEUE_VAR}" >/dev/null 2>&1 || true
+}
+
+stay_primary() {
+  log "$1 -> ${QUEUE_VAR}=${PRIMARY}"
+  record "${PRIMARY}" "$1"
+  export "${QUEUE_VAR}=${PRIMARY}"
+  buildkite-agent pipeline upload "${PIPELINE}"
+  exit 0
+}
+
+for v in THRESHOLD PRIORITY MIN_PRIORITY MAX_OVERFLOW TIMEOUT; do
+  is_int "${!v}" || stay_primary "${v} '${!v}' is not an integer"
+done
+
+TOKEN=""
+[[ -n "${TOKEN_ENV}" ]] && TOKEN="${!TOKEN_ENV:-}"
+[[ -n "${TOKEN}" ]] || stay_primary "no API token in \$${TOKEN_ENV}"
+[[ -n "${ORG}" ]] || stay_primary "BUILDKITE_ORGANIZATION_SLUG not set"
+command -v jq >/dev/null 2>&1 || stay_primary "jq not installed"
+command -v curl >/dev/null 2>&1 || stay_primary "curl not installed"
+((PRIORITY >= MIN_PRIORITY)) || stay_primary "priority ${PRIORITY} is below min-priority ${MIN_PRIORITY}"
+
+# --- ask Buildkite how busy the queues are -----------------------------------
+read -r -d '' QUERY <<'GQL' || true
+query QueueOverflow($org: ID!, $primary: [String!], $overflow: [String!], $withOverflow: Boolean!) {
+  organization(slug: $org) {
+    primaryJobs: jobs(first: 500, state: [SCHEDULED], type: [COMMAND], agentQueryRules: $primary) {
+      count
+      edges { node { ... on JobTypeCommand { priority { number } clusterQueue { key cluster { uuid } } } } }
+    }
+    idleAgents: agents(first: 500, isRunningJob: false) {
+      edges { node { connectionState metaData clusterQueue { key cluster { uuid } } } }
+    }
+    overflowJobs: jobs(first: 500, state: [SCHEDULED, ASSIGNED, ACCEPTED, RUNNING], type: [COMMAND], agentQueryRules: $overflow) @include(if: $withOverflow) {
+      count
+      edges { node { ... on JobTypeCommand { clusterQueue { key cluster { uuid } } } } }
+    }
+  }
+}
+GQL
+
+with_overflow=false
+((MAX_OVERFLOW > 0)) && with_overflow=true
+
+payload=$(jq -n \
+  --arg q "${QUERY}" --arg org "${ORG}" \
+  --arg p "queue=${PRIMARY}" --arg o "queue=${OVERFLOW}" \
+  --argjson w "${with_overflow}" \
+  '{query: $q, variables: {org: $org, primary: [$p], overflow: [$o], withOverflow: $w}}')
+
+if ! resp=$(curl -sS --fail --max-time "${TIMEOUT}" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  --data-binary "${payload}" \
+  "${QUEUE_OVERFLOW_GRAPHQL_URL:-https://graphql.buildkite.com/v1}"); then
+  stay_primary "Buildkite API request failed"
+fi
+
+if ! jq -e '.data.organization' >/dev/null 2>&1 <<<"${resp}"; then
+  log "unexpected API response: $(jq -c '.errors // .' <<<"${resp}" 2>/dev/null | head -c 500)"
+  stay_primary "Buildkite API returned an error"
+fi
+
+# A job or agent counts when it's on the queue key and, if a cluster is known,
+# in that cluster (queue keys are only unique within a cluster). Unclustered
+# jobs were already filtered by agentQueryRules; unclustered agents are matched
+# on their queue tag.
+JQ_IN_QUEUE='def in_queue($k; $c):
+  if .clusterQueue then .clusterQueue.key == $k and ($c == "" or .clusterQueue.cluster.uuid == $c)
+  elif has("metaData") then ((.metaData // []) | index("queue=" + $k)) != null
+  else true end;'
+
+ahead=$(jq --argjson p "${PRIORITY}" --arg k "${PRIMARY}" --arg c "${CLUSTER_UUID}" "${JQ_IN_QUEUE}"'
+  [.data.organization.primaryJobs.edges[]?.node
+   | select(in_queue($k; $c)) | select((.priority.number // 0) >= $p)] | length' <<<"${resp}")
+idle=$(jq --arg k "${PRIMARY}" --arg c "${CLUSTER_UUID}" "${JQ_IN_QUEUE}"'
+  [.data.organization.idleAgents.edges[]?.node
+   | select(.connectionState == "connected" and in_queue($k; $c))] | length' <<<"${resp}")
+effective=$((ahead - idle))
+
+summary="${ahead} job(s) at priority >= ${PRIORITY} waiting on ${PRIMARY}, ${idle} idle agent(s), ${effective} effectively ahead (threshold ${THRESHOLD})"
+log "${summary}"
+
+((effective > THRESHOLD)) || stay_primary "${summary}"
+
+if ((MAX_OVERFLOW > 0)); then
+  on_overflow=$(jq --arg k "${OVERFLOW}" --arg c "${CLUSTER_UUID}" "${JQ_IN_QUEUE}"'
+    [.data.organization.overflowJobs.edges[]?.node | select(in_queue($k; $c))] | length' <<<"${resp}")
+  if ((on_overflow >= MAX_OVERFLOW)); then
+    stay_primary "${summary}; but ${OVERFLOW} already has ${on_overflow} job(s) (max-overflow-jobs ${MAX_OVERFLOW})"
+  fi
+  summary="${summary}; ${OVERFLOW} has ${on_overflow}/${MAX_OVERFLOW} job(s)"
+fi
+
+if [[ "${DRY_RUN}" == "true" ]]; then
+  stay_primary "dry run, would have used ${OVERFLOW}. ${summary}"
+fi
+
+# --- overflow -----------------------------------------------------------------
+upload_file="${PIPELINE}"
+if [[ -n "${STRIP_TAGS}" ]]; then
+  upload_file=$(mktemp "${TMPDIR:-/tmp}/queue-overflow.XXXXXX")
+  trap 'rm -f "${upload_file}"' EXIT
+  awk -v var="${QUEUE_VAR}" -v tags="${STRIP_TAGS}" \
+    -f "${PLUGIN_DIR}/lib/strip-tags.awk" "${PIPELINE}" >"${upload_file}"
+  log "removed agent tag(s) [${STRIP_TAGS}] from steps using \$${QUEUE_VAR}"
+fi
+
+log "overflowing -> ${QUEUE_VAR}=${OVERFLOW}"
+record "${OVERFLOW}" "${summary}"
+export "${QUEUE_VAR}=${OVERFLOW}"
+buildkite-agent pipeline upload "${upload_file}"
