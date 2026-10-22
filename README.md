@@ -83,10 +83,15 @@ are.
 
 ### Builds that should never overflow
 
-Two ways, which can be combined:
+These can be combined:
 
 - `skip-branches`: branch glob patterns. Matching builds always stay on the
   primary queue, and the API isn't called.
+- `pull-requests-only` (default `true`): only pull request builds may overflow.
+  Branch builds (including `main`) and tag builds stay on the primary queue.
+  Set it to `false` to let them overflow too.
+- `skip-draft-prs` (default `true`): draft pull request builds stay on the
+  primary queue (Buildkite sets `BUILDKITE_PULL_REQUEST_DRAFT=true` on them).
 - `min-priority`: builds below this priority always stay on the primary queue.
 
 ```yaml
@@ -96,7 +101,10 @@ Two ways, which can be combined:
           skip-branches:
             - "renovate/*"
             - "dependabot/*"
+            - "*:*"            # fork PRs: Buildkite names their branches owner:branch
 ```
+
+With the defaults, only ready (non-draft) pull request builds can overflow.
 
 ### Priority
 
@@ -117,9 +125,14 @@ repository `pre-command` hook:
 
 When the primary queue has agents of different sizes (or workloads), use
 `routes`. Each route is its own decision, with its own queue variable and
-overflow queue. `match-tags` limits a route to the waiting jobs and idle agents
-carrying those tags, so large steps overflow when the large agents are backed
-up, regardless of how busy the small ones are.
+overflow queue. `match-tags` limits what a route counts to the agents carrying
+those tags and the waiting jobs that could run on them, so large steps overflow
+when the large agents are backed up, regardless of how busy the small ones are.
+
+A waiting job counts toward a route when, for every match-tag, it asks for that
+value, asks for any value (`size=*`), or doesn't ask for that key at all. A job
+with no `size` can run on any agent, so it counts toward both routes. An idle
+agent only counts when it carries every match-tag.
 
 ```yaml
       - theopenlane/queue-overflow#v1.0.0:
@@ -193,12 +206,14 @@ steps:
 | `pipeline` | `.buildkite/pipeline.yml` | Pipeline file to upload. |
 | `overflow-queue` | | Queue key to overflow to. Required unless `routes` is set. |
 | `queue-variable` | `QUEUE_OVERFLOW_QUEUE` | Variable opted-in steps use as their queue. |
-| `match-tags` | `[]` | Only count waiting jobs and idle agents with all of these `key=value` tags. |
+| `match-tags` | `[]` | Only count idle agents with all of these `key=value` tags, and waiting jobs that could run on them. |
 | `routes` | | List of routes, each with `queue-variable`, `overflow-queue` (both required), `match-tags`, `strip-tags`, `threshold` and `max-overflow-jobs`. |
 | `threshold` | `5` | Overflow when more than this many jobs are effectively ahead. |
 | `max-overflow-jobs` | `0` (no cap) | Don't overflow when the overflow queue already has this many scheduled or running jobs. |
 | `strip-tags` | `[]` | Agent tags to remove from opted-in steps when overflowing. |
 | `skip-branches` | `[]` | Branch glob patterns that never overflow. |
+| `skip-draft-prs` | `true` | Draft pull request builds never overflow. |
+| `pull-requests-only` | `true` | Only pull request builds may overflow. |
 | `priority` | `0` | This build's priority. |
 | `priority-env` | | Variable to read this build's priority from. Overrides `priority` when set. |
 | `min-priority` | `0` | Builds below this priority never overflow. |
@@ -218,11 +233,13 @@ Everything else that goes wrong keeps the build on the primary queue.
 For each route:
 
 ```
-ahead     = scheduled jobs on primary-queue with all match-tags
-            and priority >= this build's priority
+ahead     = scheduled jobs on primary-queue that could run on an agent with
+            the match-tags, and priority >= this build's priority
 effective = ahead - idle connected agents on primary-queue with all match-tags
 overflow if effective > threshold
         and the branch doesn't match skip-branches
+        and it is a PR (unless pull-requests-only is false)
+        and it isn't a draft PR (unless skip-draft-prs is false)
         and this build's priority >= min-priority
         and (max-overflow-jobs is 0 or jobs on overflow-queue < max-overflow-jobs)
 ```

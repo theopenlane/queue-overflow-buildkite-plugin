@@ -55,6 +55,8 @@ PRIORITY=$(cfg PRIORITY 0)
 PRIORITY_ENV=$(cfg PRIORITY_ENV)
 MIN_PRIORITY=$(cfg MIN_PRIORITY 0)
 SKIP_BRANCHES=$(cfg_list SKIP_BRANCHES)
+SKIP_DRAFT_PRS=$(cfg SKIP_DRAFT_PRS true)
+PULL_REQUESTS_ONLY=$(cfg PULL_REQUESTS_ONLY true)
 TOKEN_ENV=$(cfg API_TOKEN_ENV QUEUE_OVERFLOW_API_TOKEN)
 CLUSTER_UUID=$(cfg CLUSTER_UUID "${BUILDKITE_CLUSTER_ID:-}")
 TIMEOUT=$(cfg TIMEOUT 10)
@@ -173,6 +175,16 @@ if [[ -n "${SKIP_BRANCHES}" && -n "${BRANCH}" ]]; then
     [[ "${BRANCH}" == ${pattern} ]] && all_primary "branch '${BRANCH}' matches skip-branches '${pattern}'"
   done
 fi
+PR="${BUILDKITE_PULL_REQUEST:-false}"
+IS_PR=false
+[[ -n "${PR}" && "${PR}" != "false" ]] && IS_PR=true
+if [[ "${PULL_REQUESTS_ONLY}" == "true" && "${IS_PR}" != "true" ]]; then
+  all_primary "not a pull request (pull-requests-only)"
+fi
+if [[ "${SKIP_DRAFT_PRS}" == "true" && "${IS_PR}" == "true" &&
+  "${BUILDKITE_PULL_REQUEST_DRAFT:-}" == "true" ]]; then
+  all_primary "pull request ${PR} is a draft (skip-draft-prs)"
+fi
 ((PRIORITY >= MIN_PRIORITY)) || all_primary "priority ${PRIORITY} is below min-priority ${MIN_PRIORITY}"
 
 TOKEN=""
@@ -236,14 +248,28 @@ fi
 # A job or agent is on a queue when its key matches and, if a cluster is known,
 # it's in that cluster (queue keys are only unique within a cluster).
 # Unclustered jobs were already filtered by agentQueryRules; unclustered agents
-# are matched on their queue tag. has_tags: carries every "key=value" in $tags.
+# are matched on their queue tag.
+#
+# match-tags are checked differently on each side:
+#   agents  (has_tags):    the agent carries every key=value.
+#   jobs    (can_compete): the job could run on such an agent, i.e. for every
+#                          key it either asks for that value, asks for any
+#                          value (key=*), or doesn't ask for the key at all.
+# So a job with no size tag competes for both large and small agents.
 JQ_DEFS='
 def in_queue($k; $c):
   if .clusterQueue then .clusterQueue.key == $k and ($c == "" or .clusterQueue.cluster.uuid == $c)
   elif has("metaData") then ((.metaData // []) | index("queue=" + $k)) != null
   else true end;
-def has_tags($list; $tags): ($tags | split(",") | map(select(. != ""))) as $want
-  | ($list // []) as $have | all($want[]; . as $t | $have | index($t) != null);
+def wanted($tags): $tags | split(",") | map(select(. != ""));
+def has_tags($list; $tags): ($list // []) as $have
+  | all(wanted($tags)[]; . as $t | $have | index($t) != null);
+def can_compete($rules; $tags): ($rules // []) as $have
+  | all(wanted($tags)[];
+      . as $t
+      | (split("=")[0]) as $key
+      | [$have[] | select(startswith($key + "="))] as $asked
+      | all($asked[]; . == $t or . == ($key + "=*")));
 '
 
 # --- decide each route --------------------------------------------------------
@@ -253,7 +279,7 @@ for ((i = 0; i < N; i++)); do
 
   ahead=$(jq --argjson p "${PRIORITY}" --arg k "${PRIMARY}" --arg c "${CLUSTER_UUID}" --arg m "${match}" "${JQ_DEFS}"'
     [.data.organization.primaryJobs.edges[]?.node
-     | select(in_queue($k; $c) and has_tags(.agentQueryRules; $m))
+     | select(in_queue($k; $c) and can_compete(.agentQueryRules; $m))
      | select((.priority.number // 0) >= $p)] | length' <<<"${resp}")
   idle=$(jq --arg k "${PRIMARY}" --arg c "${CLUSTER_UUID}" --arg m "${match}" "${JQ_DEFS}"'
     [.data.organization.idleAgents.edges[]?.node

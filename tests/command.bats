@@ -50,6 +50,8 @@ EOF
   export PATH="${WORK}/bin:${PATH}"
   export BUILDKITE_ORGANIZATION_SLUG=acme
   export BUILDKITE_BRANCH=feature/x
+  export BUILDKITE_PULL_REQUEST=42 # a ready (non-draft) PR, so the PR-only defaults allow overflow
+  unset BUILDKITE_PULL_REQUEST_DRAFT
   export QUEUE_OVERFLOW_API_TOKEN=test-token
   export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_PRIMARY_QUEUE=self-hosted
   export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_OVERFLOW_QUEUE=hosted
@@ -175,6 +177,117 @@ use_routes() {
   [ ! -f "${WORK}/request.json" ]
 }
 
+@test "skip-branches can match fork PR branches (owner:branch)" {
+  export BUILDKITE_BRANCH=someone:fix-typo
+  export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_SKIP_BRANCHES_0="renovate/*"
+  export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_SKIP_BRANCHES_1="*:*"
+  jobs_n 10 0
+  run_hook
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "self-hosted" ]
+  [[ "$output" == *"matches skip-branches '*:*'"* ]]
+}
+
+@test "skip-draft-prs keeps draft PR builds on primary" {
+  export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_SKIP_DRAFT_PRS=true
+  export BUILDKITE_PULL_REQUEST=42
+  export BUILDKITE_PULL_REQUEST_DRAFT=true
+  jobs_n 10 0
+  run_hook
+  [ "$status" -eq 0 ]
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "self-hosted" ]
+  [[ "$output" == *"pull request 42 is a draft"* ]]
+  [ ! -f "${WORK}/request.json" ]
+}
+
+@test "skip-draft-prs ignores the draft flag on non-PR builds" {
+  export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_SKIP_DRAFT_PRS=true
+  export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_PULL_REQUESTS_ONLY=false
+  export BUILDKITE_PULL_REQUEST=false
+  export BUILDKITE_PULL_REQUEST_DRAFT=true
+  jobs_n 10 0
+  run_hook
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "hosted" ]
+}
+
+@test "draft PRs overflow when skip-draft-prs is false" {
+  export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_SKIP_DRAFT_PRS=false
+  export BUILDKITE_PULL_REQUEST=42
+  export BUILDKITE_PULL_REQUEST_DRAFT=true
+  jobs_n 10 0
+  run_hook
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "hosted" ]
+}
+
+@test "skip-draft-prs doesn't affect ready PRs" {
+  export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_SKIP_DRAFT_PRS=true
+  export BUILDKITE_PULL_REQUEST=42
+  jobs_n 10 0
+  run_hook
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "hosted" ]
+}
+
+@test "pull-requests-only keeps branch builds on primary" {
+  export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_PULL_REQUESTS_ONLY=true
+  export BUILDKITE_PULL_REQUEST=false
+  jobs_n 10 0
+  run_hook
+  [ "$status" -eq 0 ]
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "self-hosted" ]
+  [[ "$output" == *"not a pull request (pull-requests-only)"* ]]
+  [ ! -f "${WORK}/request.json" ]
+}
+
+@test "pull-requests-only treats a missing PR variable as not a PR" {
+  export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_PULL_REQUESTS_ONLY=true
+  unset BUILDKITE_PULL_REQUEST
+  jobs_n 10 0
+  run_hook
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "self-hosted" ]
+}
+
+@test "pull-requests-only lets PR builds overflow" {
+  export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_PULL_REQUESTS_ONLY=true
+  export BUILDKITE_PULL_REQUEST=42
+  jobs_n 10 0
+  run_hook
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "hosted" ]
+}
+
+@test "pull-requests-only and skip-draft-prs combine" {
+  export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_PULL_REQUESTS_ONLY=true
+  export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_SKIP_DRAFT_PRS=true
+  export BUILDKITE_PULL_REQUEST=42
+  export BUILDKITE_PULL_REQUEST_DRAFT=true
+  jobs_n 10 0
+  run_hook
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "self-hosted" ]
+  [[ "$output" == *"is a draft"* ]]
+}
+
+@test "by default only ready PRs overflow: branch builds stay" {
+  export BUILDKITE_PULL_REQUEST=false
+  jobs_n 10 0
+  run_hook
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "self-hosted" ]
+  [[ "$output" == *"pull-requests-only"* ]]
+}
+
+@test "by default only ready PRs overflow: drafts stay" {
+  export BUILDKITE_PULL_REQUEST_DRAFT=true
+  jobs_n 10 0
+  run_hook
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "self-hosted" ]
+  [[ "$output" == *"is a draft"* ]]
+}
+
+@test "pull-requests-only false lets branch builds overflow" {
+  export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_PULL_REQUESTS_ONLY=false
+  export BUILDKITE_PULL_REQUEST=false
+  jobs_n 10 0
+  run_hook
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "hosted" ]
+}
+
 @test "skip-branches doesn't affect other branches" {
   export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_SKIP_BRANCHES="renovate/*"
   jobs_n 10 0
@@ -290,12 +403,44 @@ use_routes() {
   grep -qx "queue-overflow:SMALL_Q=hosted-small" "${WORK}/meta"
 }
 
-@test "match-tags require every tag" {
+@test "jobs that ask for a different value of any match-tag don't count" {
   use_routes
   export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_ROUTES_0_MATCH_TAGS_1=arch=arm64
-  jobs_n 8 0 size=large
+  jobs_n 8 0 size=large arch=amd64
   run_hook
   [ "$(queue_of LARGE_Q)" = "self-hosted" ]
+  [[ "$output" == *"0 job(s) at priority >= 0 waiting on self-hosted [size=large,arch=arm64]"* ]]
+}
+
+@test "jobs without the tag compete for every route" {
+  use_routes
+  jobs_n 4 0
+  jobs_n 3 0 size=large
+  jobs_n 1 0 size=small
+  run_hook
+  [[ "$output" == *"7 job(s) at priority >= 0 waiting on self-hosted [size=large]"* ]]
+  [[ "$output" == *"5 job(s) at priority >= 0 waiting on self-hosted [size=small]"* ]]
+  [ "$(queue_of LARGE_Q)" = "hosted-large" ]
+  [ "$(queue_of SMALL_Q)" = "self-hosted" ]
+}
+
+@test "jobs asking for any value (key=*) compete" {
+  use_routes
+  jobs_n 7 0 "size=*"
+  run_hook
+  [ "$(queue_of LARGE_Q)" = "hosted-large" ]
+  [ "$(queue_of SMALL_Q)" = "hosted-small" ]
+}
+
+@test "idle agents only count when they carry every match-tag" {
+  use_routes
+  jobs_n 7 0 size=large
+  idle_agent
+  idle_agent size=small
+  idle_agent size=large
+  run_hook
+  [[ "$output" == *"waiting on self-hosted [size=large], 1 idle agent(s), 6 effectively ahead"* ]]
+  [ "$(queue_of LARGE_Q)" = "hosted-large" ]
 }
 
 @test "routes have their own thresholds and caps" {

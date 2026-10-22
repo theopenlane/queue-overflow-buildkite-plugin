@@ -27,7 +27,7 @@ configuration:
       type: array
       items:
         type: string
-      description: Only count waiting jobs and idle agents carrying all of these key=value tags.
+      description: Only count idle agents carrying all of these key=value tags, and waiting jobs that could run on them.
 
     routes:
       type: array
@@ -89,6 +89,14 @@ configuration:
       items:
         type: string
       description: Branch glob patterns (e.g. renovate/*) that never overflow.
+    skip-draft-prs:
+      type: boolean
+      description: Draft pull request builds never overflow.
+      default: true
+    pull-requests-only:
+      type: boolean
+      description: Only pull request builds may overflow; branch and tag builds always stay on the primary queue.
+      default: true
 
     api-token-env:
       type: string
