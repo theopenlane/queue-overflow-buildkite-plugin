@@ -1,0 +1,22 @@
+env:
+  LARGE_Q: ${LARGE_Q:-self-hosted}
+  SMALL_Q: ${SMALL_Q:-self-hosted}
+
+steps:
+  - label: "tests"
+    agents:
+      queue: $LARGE_Q
+      size: large
+    command: make test
+
+  - label: "lint"
+    agents:
+      queue: $SMALL_Q
+      size: small
+    command: make lint
+
+  - label: "deploy"
+    agents:
+      queue: self-hosted
+      size: large
+    command: make deploy

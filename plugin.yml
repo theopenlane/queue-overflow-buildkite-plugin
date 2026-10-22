@@ -10,21 +10,69 @@ configuration:
     primary-queue:
       type: string
       description: Queue key that opted-in steps normally run on.
-    overflow-queue:
-      type: string
-      description: Queue key to send opted-in steps to when the primary queue is backed up.
     pipeline:
       type: string
       description: Pipeline file to upload.
       default: .buildkite/pipeline.yml
+
+    # Single-route shorthand. Use these, or routes, not both.
+    overflow-queue:
+      type: string
+      description: Queue key to send opted-in steps to when the primary queue is backed up.
     queue-variable:
       type: string
       description: Environment variable the pipeline uses as the queue for steps that may overflow.
       default: QUEUE_OVERFLOW_QUEUE
+    match-tags:
+      type: array
+      items:
+        type: string
+      description: Only count waiting jobs and idle agents carrying all of these key=value tags.
+
+    routes:
+      type: array
+      description: Several independent overflow decisions, e.g. one per agent size.
+      minItems: 1
+      items:
+        type: object
+        properties:
+          queue-variable:
+            type: string
+          overflow-queue:
+            type: string
+          match-tags:
+            type: array
+            items:
+              type: string
+          strip-tags:
+            type: array
+            items:
+              type: string
+          threshold:
+            type: integer
+          max-overflow-jobs:
+            type: integer
+        required:
+          - queue-variable
+          - overflow-queue
+        additionalProperties: false
+
+    # Defaults for every route.
     threshold:
       type: integer
-      description: Overflow when more than this many jobs are effectively ahead of this build on the primary queue.
+      description: Overflow when more than this many jobs are effectively ahead of this build.
       default: 5
+    max-overflow-jobs:
+      type: integer
+      description: Don't overflow when the overflow queue already has this many scheduled or running jobs. 0 means no cap.
+      default: 0
+    strip-tags:
+      type: array
+      items:
+        type: string
+      description: Agent tags to remove from opted-in steps when they overflow.
+
+    # Which builds may overflow at all.
     priority:
       type: integer
       description: Priority of this build's jobs. Overridden by priority-env when that variable is set.
@@ -36,15 +84,12 @@ configuration:
       type: integer
       description: Builds below this priority never overflow.
       default: 0
-    max-overflow-jobs:
-      type: integer
-      description: Don't overflow when the overflow queue already has this many scheduled or running jobs. 0 means no cap.
-      default: 0
-    strip-tags:
-      type: array
+    skip-branches:
+      type: [string, array]
       items:
         type: string
-      description: Agent tags to remove from opted-in steps when they overflow (tags agents on the overflow queue don't have).
+      description: Branch glob patterns (e.g. renovate/*) that never overflow.
+
     api-token-env:
       type: string
       description: Name of the environment variable (for example a Buildkite secret) holding a GraphQL API token.
@@ -62,5 +107,7 @@ configuration:
       default: false
   required:
     - primary-queue
-    - overflow-queue
+  oneOf:
+    - required: [overflow-queue]
+    - required: [routes]
   additionalProperties: false

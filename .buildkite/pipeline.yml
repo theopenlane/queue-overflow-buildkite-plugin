@@ -1,15 +1,17 @@
 steps:
-  - label: ":sparkles: lint"
+  - label: ":shell: Shellcheck"
     plugins:
-      - docker-compose#v5.10.0:
-          run: lint
+      shellcheck#v1.4.0:
+        files:
+          - hooks/**
 
-  - label: ":shell: shellcheck"
+  - label: ":rocket: Test"
     plugins:
-      - docker-compose#v5.10.0:
-          run: shellcheck
+      docker-compose#v5.10.0:
+        run: tests
+        cli-version: 2
 
-  - label: ":bats: tests"
+  - label: ":sparkles: Lint"
     plugins:
-      - docker-compose#v5.10.0:
-          run: tests
+      plugin-linter#v3.3.0:
+        id: theopenlane/queue-overflow
