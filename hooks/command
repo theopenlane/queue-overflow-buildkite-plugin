@@ -178,8 +178,16 @@ fi
 PR="${BUILDKITE_PULL_REQUEST:-false}"
 IS_PR=false
 [[ -n "${PR}" && "${PR}" != "false" ]] && IS_PR=true
-if [[ "${PULL_REQUESTS_ONLY}" == "true" && "${IS_PR}" != "true" ]]; then
-  all_primary "not a pull request (pull-requests-only)"
+# pull-requests-only blocks builds of other branches. Pull requests, tag builds
+# and the pipeline's default branch may still overflow.
+DEFAULT_BRANCH="${BUILDKITE_PIPELINE_DEFAULT_BRANCH:-}"
+IS_TAG=false
+[[ -n "${BUILDKITE_TAG:-}" ]] && IS_TAG=true
+IS_DEFAULT_BRANCH=false
+[[ -n "${DEFAULT_BRANCH}" && "${BRANCH}" == "${DEFAULT_BRANCH}" ]] && IS_DEFAULT_BRANCH=true
+if [[ "${PULL_REQUESTS_ONLY}" == "true" && "${IS_PR}" != "true" &&
+  "${IS_TAG}" != "true" && "${IS_DEFAULT_BRANCH}" != "true" ]]; then
+  all_primary "branch '${BRANCH}' is not a pull request, tag or the default branch (pull-requests-only)"
 fi
 if [[ "${SKIP_DRAFT_PRS}" == "true" && "${IS_PR}" == "true" &&
   "${BUILDKITE_PULL_REQUEST_DRAFT:-}" == "true" ]]; then

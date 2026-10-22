@@ -87,9 +87,10 @@ These can be combined:
 
 - `skip-branches`: branch glob patterns. Matching builds always stay on the
   primary queue, and the API isn't called.
-- `pull-requests-only` (default `true`): only pull request builds may overflow.
-  Branch builds (including `main`) and tag builds stay on the primary queue.
-  Set it to `false` to let them overflow too.
+- `pull-requests-only` (default `true`): builds of other branches stay on the
+  primary queue. Pull requests, tag builds and the pipeline's default branch
+  (`BUILDKITE_PIPELINE_DEFAULT_BRANCH`, e.g. `main`) may still overflow. Set it
+  to `false` to let every branch overflow.
 - `skip-draft-prs` (default `true`): draft pull request builds stay on the
   primary queue (Buildkite sets `BUILDKITE_PULL_REQUEST_DRAFT=true` on them).
 - `min-priority`: builds below this priority always stay on the primary queue.
@@ -104,7 +105,9 @@ These can be combined:
             - "*:*"            # fork PRs: Buildkite names their branches owner:branch
 ```
 
-With the defaults, only ready (non-draft) pull request builds can overflow.
+With the defaults, ready (non-draft) pull requests, tag builds and the default
+branch can overflow. To keep the default branch or tags on the primary queue
+too, add them to `skip-branches`.
 
 ### Priority
 
@@ -213,7 +216,7 @@ steps:
 | `strip-tags` | `[]` | Agent tags to remove from opted-in steps when overflowing. |
 | `skip-branches` | `[]` | Branch glob patterns that never overflow. |
 | `skip-draft-prs` | `true` | Draft pull request builds never overflow. |
-| `pull-requests-only` | `true` | Only pull request builds may overflow. |
+| `pull-requests-only` | `true` | Builds of other branches never overflow. Pull requests, tags and the default branch still may. |
 | `priority` | `0` | This build's priority. |
 | `priority-env` | | Variable to read this build's priority from. Overrides `priority` when set. |
 | `min-priority` | `0` | Builds below this priority never overflow. |
@@ -238,7 +241,7 @@ ahead     = scheduled jobs on primary-queue that could run on an agent with
 effective = ahead - idle connected agents on primary-queue with all match-tags
 overflow if effective > threshold
         and the branch doesn't match skip-branches
-        and it is a PR (unless pull-requests-only is false)
+        and it is a PR, a tag or the default branch (unless pull-requests-only is false)
         and it isn't a draft PR (unless skip-draft-prs is false)
         and this build's priority >= min-priority
         and (max-overflow-jobs is 0 or jobs on overflow-queue < max-overflow-jobs)

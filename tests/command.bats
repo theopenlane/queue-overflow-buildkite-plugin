@@ -50,6 +50,8 @@ EOF
   export PATH="${WORK}/bin:${PATH}"
   export BUILDKITE_ORGANIZATION_SLUG=acme
   export BUILDKITE_BRANCH=feature/x
+  export BUILDKITE_PIPELINE_DEFAULT_BRANCH=main
+  unset BUILDKITE_TAG
   export BUILDKITE_PULL_REQUEST=42 # a ready (non-draft) PR, so the PR-only defaults allow overflow
   unset BUILDKITE_PULL_REQUEST_DRAFT
   export QUEUE_OVERFLOW_API_TOKEN=test-token
@@ -233,7 +235,7 @@ use_routes() {
   run_hook
   [ "$status" -eq 0 ]
   [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "self-hosted" ]
-  [[ "$output" == *"not a pull request (pull-requests-only)"* ]]
+  [[ "$output" == *"branch 'feature/x' is not a pull request, tag or the default branch (pull-requests-only)"* ]]
   [ ! -f "${WORK}/request.json" ]
 }
 
@@ -264,7 +266,7 @@ use_routes() {
   [[ "$output" == *"is a draft"* ]]
 }
 
-@test "by default only ready PRs overflow: branch builds stay" {
+@test "by default other branch builds stay on primary" {
   export BUILDKITE_PULL_REQUEST=false
   jobs_n 10 0
   run_hook
@@ -278,6 +280,54 @@ use_routes() {
   run_hook
   [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "self-hosted" ]
   [[ "$output" == *"is a draft"* ]]
+}
+
+@test "pull-requests-only lets the default branch overflow" {
+  export BUILDKITE_PULL_REQUEST=false
+  export BUILDKITE_BRANCH=main
+  jobs_n 10 0
+  run_hook
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "hosted" ]
+}
+
+@test "pull-requests-only follows the pipeline's default branch name" {
+  export BUILDKITE_PULL_REQUEST=false
+  export BUILDKITE_PIPELINE_DEFAULT_BRANCH=trunk
+  export BUILDKITE_BRANCH=main
+  jobs_n 10 0
+  run_hook
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "self-hosted" ]
+  export BUILDKITE_BRANCH=trunk
+  run_hook
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "hosted" ]
+}
+
+@test "pull-requests-only with no known default branch keeps branch builds on primary" {
+  export BUILDKITE_PULL_REQUEST=false
+  unset BUILDKITE_PIPELINE_DEFAULT_BRANCH
+  export BUILDKITE_BRANCH=main
+  jobs_n 10 0
+  run_hook
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "self-hosted" ]
+}
+
+@test "pull-requests-only lets tag builds overflow" {
+  export BUILDKITE_PULL_REQUEST=false
+  export BUILDKITE_TAG=v1.2.3
+  export BUILDKITE_BRANCH=v1.2.3
+  jobs_n 10 0
+  run_hook
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "hosted" ]
+}
+
+@test "skip-branches still applies to the default branch" {
+  export BUILDKITE_PULL_REQUEST=false
+  export BUILDKITE_BRANCH=main
+  export BUILDKITE_PLUGIN_QUEUE_OVERFLOW_SKIP_BRANCHES_0=main
+  jobs_n 10 0
+  run_hook
+  [ "$(queue_of QUEUE_OVERFLOW_QUEUE)" = "self-hosted" ]
+  [[ "$output" == *"matches skip-branches 'main'"* ]]
 }
 
 @test "pull-requests-only false lets branch builds overflow" {

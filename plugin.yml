@@ -95,7 +95,7 @@ configuration:
       default: true
     pull-requests-only:
       type: boolean
-      description: Only pull request builds may overflow; branch and tag builds always stay on the primary queue.
+      description: Builds of other branches stay on the primary queue. Pull requests, tag builds and the pipeline's default branch may still overflow.
       default: true
 
     api-token-env:
